@@ -1,122 +1,101 @@
-import logging
+import asyncio
+import re
 import requests
-from bs4 import BeautifulSoup
-from telegram import Bot, InputMediaPhoto, Update
-from telegram.ext import Updater, MessageHandler, Filters, CallbackContext
-from linkvertise_bypasser import Bypasser
+from pastelink import Paste
+from telethon import TelegramClient
+from telethon.tl.functions.messages import GetHistoryRequest
 
-# Credentials (HARD-CODED)
-BOT_TOKEN = "8067339211:AAE-yvNtTRv7-O09YoIMi3qbYD23aw7v_vY"
-CHANNEL_USERNAME = "@fansdeposit"
-GPLINKS_API = "eb820552d0f95f920542577393c3d88d6dbf6386"
-PASTELINK_API_KEY = "bwecc2dqac9k9jk3vejjeqpfjnkwybpx7pwshccoqf5huuct9ud3w3awfqdbh7ryb763yjuqkbb"
+from linkvertise_bypasser import bypass_url
 
-# Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Telegram API credentials
+api_id = 11752289
+api_hash = "1c67aaab57aa95bf84145e199c69f500"
+phone_number = "+5521984561253"
 
-def bypass_and_extract(url: str) -> str:
+# GPLinks API
+gplinks_api = "eb820552d0f95f920542577393c3d88d6dbf6386"
+
+# Pastelink API
+pastelink_api = "bwecc2dqac9k9jk3vejjeqpfjnkwybpx7pwshccoqf5huuct9ud3w3awfqdbh7ryb763yjuqkbb"
+
+# Telegram channels
+source_channel = "OnlyFansFile"
+target_channel = "fansdeposit"
+
+client = TelegramClient("session", api_id, api_hash)
+
+def extract_pastelink(text):
+    match = re.search(r"(https:\/\/pastelink\.net\/\S+)", text)
+    return match.group(1) if match else None
+
+def extract_mega_link(text):
+    match = re.search(r"https:\/\/mega\.nz\/[^\s]+", text)
+    return match.group(0) if match else None
+
+def replace_tme_links(text):
+    return re.sub(r"https?:\/\/t\.me\/\S+", "https://t.me/fansdeposit", text)
+
+def shorten_with_gplinks(destination_url):
+    api = f"https://api.gplinks.com/api?api={gplinks_api}&url={destination_url}"
     try:
-        bypassed = Bypasser().bypass(url)
-        print("Bypassed link:", bypassed)
-        return bypassed
-    except Exception as e:
-        logger.error(f"Bypass failed: {e}")
-        return None
-
-def extract_mega_link(paste_url: str) -> str:
-    try:
-        res = requests.get(paste_url)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        text = soup.get_text()
-        lines = text.strip().split("\n")
-        mega_links = [line.strip() for line in lines if "mega.nz" in line]
-        cleaned = []
-        for line in lines:
-            if "t.me" in line:
-                line = line.replace("t.me", "https://t.me/fansdeposit")
-            if "mega.nz" in line or "t.me" in line:
-                cleaned.append(line)
-        return "\n".join(cleaned)
-    except Exception as e:
-        logger.error(f"Error extracting from pastelink: {e}")
-        return None
-
-def create_pastelink(content: str) -> str:
-    try:
-        response = requests.post("https://api.pastelink.net/v1/paste", data={
-            "api_key": PASTELINK_API_KEY,
-            "title": "Download Link",
-            "content": content,
-            "visibility": 1
-        })
-        data = response.json()
-        return "https://pastelink.net/" + data["id"]
-    except Exception as e:
-        logger.error(f"Pastelink error: {e}")
-        return None
-
-def shorten_with_gplinks(url: str) -> str:
-    try:
-        api = f"https://api.gplinks.com/api?api={GPLINKS_API}&url={url}"
         res = requests.get(api).json()
-        return res["shortenedUrl"] if "shortenedUrl" in res else None
+        return res.get("shortenedUrl", "Failed to shorten")
+    except:
+        return "Error with GPLinks"
+
+def create_pastelink(content):
+    paste = Paste(api_key=pastelink_api)
+    try:
+        return paste.create(content=content)
     except Exception as e:
-        logger.error(f"GPLinks error: {e}")
+        print("Pastelink error:", e)
         return None
 
-def handle_message(update: Update, context: CallbackContext):
-    if not update.message or not update.message.text:
-        return
+async def process_messages():
+    await client.start(phone=phone_number)
 
-    text = update.message.text
-    photo = update.message.photo[-1].file_id if update.message.photo else None
+    history = await client(GetHistoryRequest(
+        peer=source_channel,
+        limit=100,
+        offset_date=None,
+        offset_id=0,
+        max_id=0,
+        min_id=0,
+        add_offset=0,
+        hash=0
+    ))
 
-    if "linkvertise" not in text and "pastelink.net" not in text:
-        return
+    messages = history.messages
+    for message in reversed(messages):
+        if message.message and "pastelink" in message.message:
+            pastelink_url = extract_pastelink(message.message)
+            if not pastelink_url:
+                continue
 
-    try:
-        link = None
-        for word in text.split():
-            if "linkvertise" in word or "pastelink.net" in word:
-                link = word
-                break
+            print("Bypassing:", pastelink_url)
+            try:
+                final_page = bypass_url(pastelink_url)
+            except Exception as e:
+                print("Bypass failed:", e)
+                continue
 
-        if not link:
-            return
+            mega_link = extract_mega_link(final_page)
+            if not mega_link:
+                print("No Mega link found")
+                continue
 
-        bypassed = bypass_and_extract(link)
-        if not bypassed:
-            return
+            clean_content = replace_tme_links(final_page)
+            pastelink_result = create_pastelink(clean_content)
+            if not pastelink_result:
+                print("Pastelink creation failed")
+                continue
 
-        mega_content = extract_mega_link(bypassed)
-        if not mega_content:
-            return
-
-        new_paste = create_pastelink(mega_content)
-        if not new_paste:
-            return
-
-        gplink = shorten_with_gplinks(new_paste)
-        if not gplink:
-            return
-
-        if photo:
-            context.bot.send_photo(chat_id=CHANNEL_USERNAME, photo=photo, caption=gplink)
-        else:
-            context.bot.send_message(chat_id=CHANNEL_USERNAME, text=gplink)
-
-    except Exception as e:
-        logger.error(f"Processing failed: {e}")
-
-def main():
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    updater.start_polling()
-    logger.info("Bot started")
-    updater.idle()
+            shortened = shorten_with_gplinks(pastelink_result)
+            if message.photo:
+                await client.send_file(target_channel, file=message.photo, caption=shortened)
+            else:
+                await client.send_message(target_channel, shortened)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(process_messages())
     
