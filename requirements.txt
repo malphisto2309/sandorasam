@@ -3,3 +3,4 @@ telethon==1.33.1
 requests
 beautifulsoup4
 linkvertise-bypasser
+pastelink
