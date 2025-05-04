@@ -1,119 +1,122 @@
-import os
+import logging
 import requests
-from telegram import Bot, Update
-from telegram.ext import CommandHandler, MessageHandler, Filters, Updater
 from bs4 import BeautifulSoup
+from telegram import Bot, InputMediaPhoto, Update
+from telegram.ext import Updater, MessageHandler, Filters, CallbackContext
 from linkvertise_bypasser import Bypasser
 
-# Environment
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")
-PASTELINK_API_KEY = os.getenv("PASTELINK_API_KEY")
-GPLINKS_API = os.getenv("GPLINKS_API")
+# Credentials (HARD-CODED)
+BOT_TOKEN = "8067339211:AAE-yvNtTRv7-O09YoIMi3qbYD23aw7v_vY"
+CHANNEL_USERNAME = "@fansdeposit"
+GPLINKS_API = "eb820552d0f95f920542577393c3d88d6dbf6386"
+PASTELINK_API_KEY = "bwecc2dqac9k9jk3vejjeqpfjnkwybpx7pwshccoqf5huuct9ud3w3awfqdbh7ryb763yjuqkbb"
 
-bot = Bot(token=BOT_TOKEN)
-bypasser = Bypasser()
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def bypass_link(url):
+def bypass_and_extract(url: str) -> str:
     try:
-        return bypasser.bypass(url)
-    except:
+        bypassed = Bypasser().bypass(url)
+        print("Bypassed link:", bypassed)
+        return bypassed
+    except Exception as e:
+        logger.error(f"Bypass failed: {e}")
         return None
 
-def extract_and_clean_paste(paste_url):
+def extract_mega_link(paste_url: str) -> str:
     try:
-        r = requests.get(paste_url)
-        soup = BeautifulSoup(r.text, "html.parser")
-        content = soup.find("div", {"id": "content"}).get_text(separator="\n")
-        lines = content.splitlines()
+        res = requests.get(paste_url)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        text = soup.get_text()
+        lines = text.strip().split("\n")
+        mega_links = [line.strip() for line in lines if "mega.nz" in line]
         cleaned = []
         for line in lines:
-            if "mega.nz" in line:
-                cleaned.append(line.strip())
-            elif "t.me/" in line:
-                cleaned.append("https://t.me/fansdeposit")
+            if "t.me" in line:
+                line = line.replace("t.me", "https://t.me/fansdeposit")
+            if "mega.nz" in line or "t.me" in line:
+                cleaned.append(line)
         return "\n".join(cleaned)
     except Exception as e:
-        print("Paste extract error:", e)
+        logger.error(f"Error extracting from pastelink: {e}")
         return None
 
-def create_pastelink(text):
-    payload = {
-        "api": PASTELINK_API_KEY,
-        "title": "Content Drop",
-        "description": "Auto-posted",
-        "content": text,
-        "visibility": 1
-    }
+def create_pastelink(content: str) -> str:
     try:
-        r = requests.post("https://pastelink.net/api/create", data=payload)
-        return r.json().get("url")
+        response = requests.post("https://api.pastelink.net/v1/paste", data={
+            "api_key": PASTELINK_API_KEY,
+            "title": "Download Link",
+            "content": content,
+            "visibility": 1
+        })
+        data = response.json()
+        return "https://pastelink.net/" + data["id"]
     except Exception as e:
-        print("Paste create error:", e)
+        logger.error(f"Pastelink error: {e}")
         return None
 
-def shorten_with_gplinks(link):
-    api_url = f"https://api.gplinks.com/api?api={GPLINKS_API}&url={link}"
+def shorten_with_gplinks(url: str) -> str:
     try:
-        r = requests.get(api_url)
-        result = r.json()
-        return result["shortenedUrl"] if result["status"] == "success" else None
+        api = f"https://api.gplinks.com/api?api={GPLINKS_API}&url={url}"
+        res = requests.get(api).json()
+        return res["shortenedUrl"] if "shortenedUrl" in res else None
     except Exception as e:
-        print("GPLinks error:", e)
+        logger.error(f"GPLinks error: {e}")
         return None
 
-def process_message(update: Update, context):
-    if not update.message or not update.message.caption:
+def handle_message(update: Update, context: CallbackContext):
+    if not update.message or not update.message.text:
         return
 
-    caption = update.message.caption
-    download_link = None
+    text = update.message.text
+    photo = update.message.photo[-1].file_id if update.message.photo else None
 
-    for line in caption.splitlines():
-        if "http" in line:
-            download_link = line.strip()
-            break
-
-    if not download_link:
+    if "linkvertise" not in text and "pastelink.net" not in text:
         return
 
-    bypassed = bypass_link(download_link)
-    if not bypassed:
-        return
+    try:
+        link = None
+        for word in text.split():
+            if "linkvertise" in word or "pastelink.net" in word:
+                link = word
+                break
 
-    cleaned_text = extract_and_clean_paste(bypassed)
-    if not cleaned_text:
-        return
+        if not link:
+            return
 
-    new_paste_url = create_pastelink(cleaned_text)
-    if not new_paste_url:
-        return
+        bypassed = bypass_and_extract(link)
+        if not bypassed:
+            return
 
-    final_short_url = shorten_with_gplinks(new_paste_url)
-    if not final_short_url:
-        return
+        mega_content = extract_mega_link(bypassed)
+        if not mega_content:
+            return
 
-    photo_file_id = update.message.photo[-1].file_id if update.message.photo else None
-    if photo_file_id:
-        bot.send_photo(
-            chat_id=CHANNEL_USERNAME,
-            photo=photo_file_id,
-            caption=final_short_url
-        )
+        new_paste = create_pastelink(mega_content)
+        if not new_paste:
+            return
 
-def start(update, context):
-    update.message.reply_text("Bot is running.")
+        gplink = shorten_with_gplinks(new_paste)
+        if not gplink:
+            return
+
+        if photo:
+            context.bot.send_photo(chat_id=CHANNEL_USERNAME, photo=photo, caption=gplink)
+        else:
+            context.bot.send_message(chat_id=CHANNEL_USERNAME, text=gplink)
+
+    except Exception as e:
+        logger.error(f"Processing failed: {e}")
 
 def main():
-    updater = Updater(BOT_TOKEN)
+    updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.chat(username="@OnlyFansFile") & Filters.photo, process_message))
-
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.start_polling()
+    logger.info("Bot started")
     updater.idle()
 
 if __name__ == "__main__":
     main()
-      
+    
